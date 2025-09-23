@@ -1,9 +1,7 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
-  /* config options here */
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   reactStrictMode: true,
-
+  
   // This webpack config is required for wagmi/Reown AppKit SSR compatibility
   webpack: (config) => {
     config.externals.push("pino-pretty", "lokijs", "encoding");
@@ -11,4 +9,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+module.exports = nextConfig;
