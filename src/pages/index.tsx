@@ -10,7 +10,6 @@ import { useAppKit } from '@reown/appkit/react'; // ✅ 1. Import the hook
 const ClientOnlyToaster = dynamic(() => import('@/components/ClientOnlyToaster'), {
   ssr: false,
 });
-
 // =================================================================
 // TYPE DEFINITIONS
 // =================================================================
