@@ -1,28 +1,24 @@
 // src/pages/_app.tsx
-import type { AppProps } from "next/app";
-import { WagmiProvider, createConfig, http } from "wagmi";
-import { sepolia } from "wagmi/chains";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { injected } from "@wagmi/connectors";
-import '../styles/globals.css'
-const config = createConfig({
-  chains: [sepolia],
-  transports: {
-    [sepolia.id]: http(),
-  },
-  connectors: [
-    injected(), // ✅ no chains here anymore
-  ],
-});
+import type { AppProps } from 'next/app';
+import ContextProvider from '../context/ContextProvider'; // Import the provider
+import '../styles/globals.css';
 
-const queryClient = new QueryClient();
-
-export default function App({ Component, pageProps }: AppProps) {
+// Note: We need to get the initial cookies for server-side rendering
+function App({ Component, pageProps }: AppProps & { pageProps: { cookies: string | null } }) {
   return (
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient}>
-        <Component {...pageProps} />
-      </QueryClientProvider>
-    </WagmiProvider>
+    <ContextProvider cookies={pageProps.cookies}>
+      <Component {...pageProps} />
+    </ContextProvider>
   );
 }
+
+// This function runs on the server to get cookies before the page renders
+App.getInitialProps = async ({ ctx }: any) => {
+  return {
+    pageProps: {
+      cookies: ctx.req.headers.cookie ?? null,
+    },
+  };
+};
+
+export default App;
