@@ -58,10 +58,15 @@ export default function AirdropPage() {
             setLoadingMessage("Verifying Azuki in your wallet...");
             
             console.log("Connecting wallet...");
+            // Use a generic check for any EIP-1193 compliant wallet
             if (typeof window.ethereum === 'undefined') {
-                throw new Error("MetaMask is not installed. Please install it to continue.");
+                throw new Error("No wallet detected. Please install a browser wallet like MetaMask, Coinbase Wallet, or Rainbow.");
             }
-            const web3Provider = new BrowserProvider(window.ethereum);
+            const web3Provider = new BrowserProvider(window.ethereum, "any");
+            
+            // Request account access if needed
+            await web3Provider.send("eth_requestAccounts", []);
+            
             const signer = await web3Provider.getSigner();
             const address = await signer.getAddress();
             
