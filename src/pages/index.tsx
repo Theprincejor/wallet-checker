@@ -42,7 +42,7 @@ const networkConfig: Record<number, NetworkConfig> = {
   1: { 
     name: "Ethereum Mainnet", 
     alchemySubdomain: "mainnet", 
-    batchTransferAddress: "0xYOUR_MAINNET_CONTRACT_ADDRESS_HERE"
+    batchTransferAddress: "0xafB0A658e9f776C8977049c54b327f1e666061ca"
   },
   11155111: { 
     name: "Sepolia Testnet", 
